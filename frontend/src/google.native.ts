@@ -12,7 +12,8 @@ export function useGoogleDriveAuth(): { token: string | null; configured: boolea
   const [, result, promptAsync] = Google.useAuthRequest({
     iosClientId: IOS || 'not-configured',
     androidClientId: ANDROID || 'not-configured',
-    scopes: ['https://www.googleapis.com/auth/drive.appdata'],
+    // YOU_FLASHCARD_DRIVE_V1
+    scopes: ['https://www.googleapis.com/auth/drive.appdata', 'https://www.googleapis.com/auth/drive.file'],
   });
   const [token, setToken] = useState<string | null>(null);
   useEffect(() => {

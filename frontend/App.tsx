@@ -5,12 +5,21 @@ import {
 } from 'react-native';
 import {
   activeCards, activeDecks, dailyReviewCounts, dueCards, emptySnapshot,
-  makeCard, makeDeck, mergeSnapshots, progress, rateCard, validateSnapshot,
+  makeCard, makeDeck, mergeSnapshots, progress, rateCard, validateSnapshot, importAsNewDecks,
+  deleteDeckData, deleteCardData, clearAllData,
   type Card, type Deck, type Grade, type Snapshot,
 } from './src/domain';
 import { loadSnapshot, saveSnapshot } from './src/storage';
 import { useGoogleDriveAuth } from './src/google';
-import { syncDrive } from './src/drive';
+import { syncDrive, listMyDriveFiles, readMyDriveFile, saveMyDriveFile,
+  removeMyDriveFile, removeAllMyDriveFiles, readPickedJsonFile, type MyDriveFile } from './src/drive';
+import { pickMyDriveJson } from './src/drive-picker';
+// DIY_FLASHCARD_AUTO_SYNC_V1
+import { ensureAutoSyncFile, readAutoSyncFile, writeAutoSyncFile, syncAutoSyncFile, MissingAutoSyncTargetError, type AutoSyncTarget } from './src/auto-sync-drive';
+import { snapshotSignature } from './src/auto-sync-merge';
+import { loadAutoSyncTarget, saveAutoSyncTarget, clearAutoSyncTarget,
+  loadAutoSyncBaseline, saveAutoSyncBaseline, clearAutoSyncBaseline } from './src/auto-sync-target';
+import MathContent from './src/MathContent';
 
 const C = {
   bg: '#0B0912', panel: '#181425', panel2: '#231C34', border: '#352B4C',
@@ -64,7 +73,19 @@ export default function App() {
   const [back, setBack] = useState('');
   const [editingCard, setEditingCard] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [driveFiles, setDriveFiles] = useState<MyDriveFile[]>([]);
   const auth = useGoogleDriveAuth();
+  // DIY_FLASHCARD_AUTO_SYNC_V1: browser-only target; never store OAuth tokens.
+  const [autoTarget, setAutoTarget] = useState<AutoSyncTarget | null>(null);
+  // DIY_FLASHCARD_MISSING_DRIVE_TARGET_V1
+  const [autoStatus, setAutoStatus] = useState('Off');
+  const [autoTargetMissing, setAutoTargetMissing] = useState(false);
+  const autoBusyRef = useRef(false);
+  const autoPendingRef = useRef(false);
+  const autoTargetRef = useRef<AutoSyncTarget | null>(null);
+  const authTokenRef = useRef<string | null>(null);
+  autoTargetRef.current = autoTarget;
+  authTokenRef.current = auth.token;
   const notify = (message: string) => setNotice(message);
 
   useEffect(() => {
@@ -83,7 +104,149 @@ export default function App() {
     saving.current = saving.current.catch(() => {}).then(() => saveSnapshot(next));
     void saving.current.catch(error => notify(`Save failed: ${String(error.message || error)}`));
   }, []);
-  const decks = activeDecks(snapshot);
+  // Drive is checked once on connection, every 60 seconds while visible,
+  // and ~2.5 seconds after an app change. OAuth tokens expire; reconnect if needed.
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    void loadAutoSyncTarget().then(t => { autoTargetRef.current = t; setAutoTarget(t); })
+      .catch(e => notify(`Auto-sync target error: ${String((e as Error).message || e)}`));
+  }, []);
+  const runAutoSync = useCallback(async () => {
+    const t = autoTargetRef.current;
+    const token = authTokenRef.current;
+    if (Platform.OS !== 'web' || !t || !token || loading) return;
+    if (autoBusyRef.current) { autoPendingRef.current = true; return; }
+    autoBusyRef.current = true;
+    setAutoStatus('Syncing...');
+    try {
+      await saving.current;
+      const before = snapshotRef.current;
+      const base = await loadAutoSyncBaseline(t.id);
+      const result = await syncAutoSyncFile(token, t, before, base);
+      // Do not replace edits made while the network request was in progress.
+      if (autoTargetRef.current?.id !== t.id || authTokenRef.current !== token) return;
+      const live = snapshotRef.current;
+      const next = live === before ? result.snapshot : mergeSnapshots(live, result.snapshot);
+      if (snapshotSignature(next) !== snapshotSignature(live)) {
+        snapshotRef.current = next;
+        setSnapshot(next);
+        saving.current = saving.current.catch(() => {}).then(() => saveSnapshot(next));
+        await saving.current;
+      }
+      await saveAutoSyncBaseline(t.id, result.baseline);
+      if (live !== before) autoPendingRef.current = true;
+      setAutoTargetMissing(false);
+      setAutoStatus(`Synced at ${new Date().toLocaleTimeString('en-US')}`);
+    } catch (error) {
+      setAutoTargetMissing(error instanceof MissingAutoSyncTargetError);
+      setAutoStatus(`Sync failed: ${String((error as Error).message || error)}`);
+    } finally {
+      autoBusyRef.current = false;
+      if (autoPendingRef.current) {
+        autoPendingRef.current = false;
+        // Prevent stack recursion and let the browser process user input.
+        void Promise.resolve().then(runAutoSync);
+      }
+    }
+  }, [loading]);
+  useEffect(() => {
+    if (!auth.token || !autoTarget || loading || Platform.OS !== 'web') {
+      if (!auth.token && autoTarget) setAutoStatus('Paused: connect Google account');
+      return;
+    }
+    void runAutoSync();
+    const timer = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') void runAutoSync();
+    }, 60000);
+    return () => clearInterval(timer);
+  }, [auth.token, autoTarget?.id, loading, runAutoSync]);
+  useEffect(() => {
+    if (!autoTarget || !auth.token || loading || Platform.OS !== 'web') return;
+    const timer = setTimeout(() => { void runAutoSync(); }, 2500);
+    return () => clearTimeout(timer);
+  }, [snapshot, autoTarget?.id, auth.token, loading, runAutoSync]);
+  async function enableAutoSync() {
+    if (!auth.token) { notify('Connect Google Drive first.'); return; }
+    if (Platform.OS !== 'web') { notify('Auto-sync is available on Web only.'); return; }
+    setBusy(true);
+    try {
+      await saving.current;
+      const created = await ensureAutoSyncFile(auth.token, snapshotRef.current);
+      if (created.created) await saveAutoSyncBaseline(created.target.id, snapshotRef.current);
+      else await clearAutoSyncBaseline(created.target.id);
+      await saveAutoSyncTarget(created.target);
+      autoTargetRef.current = created.target;
+      setAutoTarget(created.target);
+      setAutoTargetMissing(false);
+      setAutoStatus('Linked. Starting auto-sync...');
+      notify(`Auto-sync enabled: My Drive/${created.target.name}`);
+    } catch (error) { notify(`Cannot enable auto-sync: ${String((error as Error).message || error)}`); }
+    finally { setBusy(false); }
+  }
+  async function linkPickedAutoSync() {
+    if (!auth.token) { notify('Connect Google Drive first.'); return; }
+    if (Platform.OS !== 'web') return;
+    setBusy(true);
+    try {
+      await saving.current;
+      const chosen = await pickMyDriveJson(auth.token);
+      if (!chosen) return;
+      const ok = typeof window !== 'undefined' && window.confirm(
+        `Link "${chosen.name}" for automatic two-way sync?\n\n` +
+        'The app will import its active cards as NEW decks, then REPLACE this selected Drive JSON with the combined study data. ' +
+        'Make a copy in Drive first if you need the original unchanged.');
+      if (!ok) return;
+      const original = await readAutoSyncFile(auth.token, chosen.id);
+      const imported = importAsNewDecks(original);
+      const prepared = mergeSnapshots(snapshotRef.current, imported);
+      await writeAutoSyncFile(auth.token, chosen.id, prepared);
+      snapshotRef.current = prepared;
+      setSnapshot(prepared);
+      saving.current = saving.current.catch(() => {}).then(() => saveSnapshot(prepared));
+      await saving.current;
+      await saveAutoSyncBaseline(chosen.id, prepared);
+      const target = { id: chosen.id, name: chosen.name };
+      await saveAutoSyncTarget(target);
+      autoTargetRef.current = target;
+      setAutoTarget(target);
+      setAutoTargetMissing(false);
+      setAutoStatus('Linked. Starting auto-sync...');
+      notify(`Auto-sync enabled for ${chosen.name}. No need to pick it again.`);
+    } catch (error) { notify(`Could not link JSON: ${String((error as Error).message || error)}`); }
+    finally { setBusy(false); }
+  }
+  async function disableAutoSync() {
+    const t = autoTargetRef.current;
+    autoTargetRef.current = null;
+    setAutoTarget(null);
+    await clearAutoSyncTarget();
+    if (t) await clearAutoSyncBaseline(t.id);
+    setAutoTargetMissing(false);
+    setAutoStatus('Off');
+    notify('Auto-sync disabled. Google Drive files were not deleted.');
+  }
+  async function clearLocalAfterMissingDriveTarget() {
+    if (!autoTargetMissing || !autoTargetRef.current) return;
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return;
+    if (!window.confirm(
+      'The linked Drive JSON is missing or inaccessible. Clear ALL local decks, cards, and review history, then unlink auto-sync?\n\n' +
+      'This action will NOT delete or change the hidden Google Drive backup.'
+    )) return;
+    if (!window.confirm('FINAL CONFIRMATION: Clear ALL local study data? This cannot be undone.')) return;
+    try {
+      await disableAutoSync();
+      mutate(s => clearAllData(s));
+      setSelectedDeck(null);
+      setStudyDeck(undefined);
+      setEditingCard(null);
+      setFront('');
+      setBack('');
+      notify('Local decks and review history cleared; auto-sync unlinked. Hidden Drive backup was NOT changed.');
+    } catch (error) {
+      notify(`Local clear failed: ${String((error as Error).message || error)}`);
+    }
+  }
+    const decks = activeDecks(snapshot);
   const cards = activeCards(snapshot);
   const due = dueCards(snapshot);
   const stats = progress(snapshot);
@@ -126,19 +289,18 @@ export default function App() {
     ]);
   }
   function removeCard(card: Card) {
-    confirmDelete('Delete this card?', () => {
-      const now = new Date().toISOString();
-      mutate(s => ({ ...s, cards: s.cards.map(c => c.id === card.id ? { ...c, deletedAt: now, updatedAt: now } : c) }));
+    confirmDelete('Delete this card and its review history? Changes propagate on the next sync.', () => {
+      mutate(s => deleteCardData(s, card.id));
       if (editingCard === card.id) { setEditingCard(null); setFront(''); setBack(''); }
-      notify('Card deleted. The deletion will be preserved during sync.');
+      notify('Card deleted. Sync Drive to apply the deletion to cloud backups.');
     });
   }
   function removeDeck(deck: Deck) {
-    confirmDelete(`Delete "${deck.name}" and hide its cards?`, () => {
-      const now = new Date().toISOString();
-      mutate(s => ({ ...s, decks: s.decks.map(d => d.id === deck.id ? { ...d, deletedAt: now, updatedAt: now } : d) }));
+    confirmDelete(`Delete "${deck.name}" including ALL its cards and review history?`, () => {
+      mutate(s => deleteDeckData(s, deck.id));
       setSelectedDeck(null);
-      notify('Deck deleted.');
+      if (studyDeck === deck.id) setStudyDeck(undefined);
+      notify('Deck and review history deleted. Sync hidden Drive to propagate deletion.');
     });
   }
   function review(grade: Grade) {
@@ -158,6 +320,93 @@ export default function App() {
       notify('Google Drive sync completed.');
     } catch (error) { notify(`Sync failed: ${String((error as Error).message)}`); }
     finally { setBusy(false); }
+  }
+  // YOU_FLASHCARD_DRIVE_V1 — destructive data management and visible Drive files.
+  async function saveVisibleDrive(deckId?: string) {
+    if (!auth.token) { notify('Connect Google Drive first.'); return; }
+    setBusy(true);
+    try {
+      await saving.current;
+      const saved = await saveMyDriveFile(auth.token, snapshotRef.current, deckId);
+      setDriveFiles(await listMyDriveFiles(auth.token));
+      notify(`Saved directly to My Drive: ${saved.name}`);
+    } catch (e) { notify(`My Drive save failed: ${String((e as Error).message || e)}`); }
+    finally { setBusy(false); }
+  }
+  async function refreshDriveFiles() {
+    if (!auth.token) { notify('Connect Google Drive first.'); return; }
+    setBusy(true);
+    try { setDriveFiles(await listMyDriveFiles(auth.token)); }
+    catch (e) { notify(`My Drive listing failed: ${String((e as Error).message || e)}`); }
+    finally { setBusy(false); }
+  }
+
+  // YOU_FLASHCARD_GOOGLE_PICKER_V2 — manually uploaded JSON in My Drive.
+  async function importWithPicker() {
+    if (!auth.token) { notify('Connect Google Drive before selecting a JSON file.'); return; }
+    if (Platform.OS !== 'web') { notify('This feature is available in the Web app only.'); return; }
+    setBusy(true);
+    try {
+      await saving.current;
+      const chosen = await pickMyDriveJson(auth.token);
+      if (!chosen) return;
+      // An import is intentionally additive; previous deletion tombstones stay intact.
+      if (typeof window !== 'undefined' && !window.confirm(`Import "${chosen.name}" as NEW decks? This resets study progress for those imported cards and will not delete existing data.`)) return;
+      const remote = await readPickedJsonFile(auth.token, chosen.id);
+      const imported = importAsNewDecks(remote);
+      mutate(s => mergeSnapshots(s, imported));
+      notify(`Imported ${imported.decks.length} deck(s) and ${imported.cards.length} card(s) from My Drive. Use Sync with Drive to back up the result.`);
+      setSelectedDeck(null);
+    } catch (error) { notify(`Drive Picker import failed: ${String((error as Error).message || error)}`); }
+    finally { setBusy(false); }
+  }
+
+  async function loadVisibleFile(file: MyDriveFile) {
+    if (!auth.token) return;
+    setBusy(true);
+    try {
+      const data = await readMyDriveFile(auth.token, file.id);
+      mutate(s => mergeSnapshots(s, data));
+      notify(`Imported directly from My Drive: ${file.name}`);
+    } catch (e) { notify(`My Drive import failed: ${String((e as Error).message || e)}`); }
+    finally { setBusy(false); }
+  }
+  function deleteVisibleFile(file: MyDriveFile) {
+    confirmDelete(`Delete the actual file "${file.name}" from My Drive? This cannot be undone.`, () => {
+      if (!auth.token) return;
+      setBusy(true);
+      void removeMyDriveFile(auth.token, file.id)
+        .then(() => setDriveFiles(previous => previous.filter(f => f.id !== file.id)))
+        .then(() => notify(`Deleted My Drive file: ${file.name}`))
+        .catch(e => notify(`My Drive deletion failed: ${String((e as Error).message || e)}`))
+        .finally(() => setBusy(false));
+    });
+  }
+  function clearEverything() {
+    confirmDelete('Delete ALL decks, cards, and review history? This cannot be undone.', () => {
+      confirmDelete('FINAL CONFIRMATION: Reset all local study data and delete app-created My Drive files? Existing shared copies on other devices are not affected until they sync.', () => {
+        mutate(s => clearAllData(s));
+        setSelectedDeck(null); setStudyDeck(undefined); setEditingCard(null); setFront(''); setBack('');
+        if (!auth.token) {
+          notify('All local data cleared. Reconnect to Drive and sync to propagate the deletions. Remote backups remain until then.');
+          return;
+        }
+        setBusy(true);
+        void (async () => {
+          try {
+            // Hidden appData retains scrubbed tombstones to prevent stale synced data resurfacing.
+            const synced = await syncDrive(auth.token!, snapshotRef.current);
+            mutate(s => mergeSnapshots(s, synced));
+            // Visible backups are actual files and are deleted, not just hidden.
+            const count = await removeAllMyDriveFiles(auth.token!);
+            setDriveFiles([]);
+            notify(`All data cleared; hidden Drive sync updated and ${count} My Drive file(s) deleted.`);
+          } catch (e) {
+            notify(`Local data cleared, but Drive cleanup is incomplete: ${String((e as Error).message || e)}. Reconnect and retry sync/cleanup.`);
+          } finally { setBusy(false); }
+        })();
+      });
+    });
   }
   async function exportJson() {
     const json = JSON.stringify(snapshotRef.current, null, 2);
@@ -269,7 +518,8 @@ export default function App() {
             <View style={[styles.buttonRow, { marginTop: 17, marginBottom: 18 }]}>
               <Button label="← All Decks" variant="subtle" small onPress={() => { setSelectedDeck(null); setEditingCard(null); setFront(''); setBack(''); }}/>
               <Button label="Study This Deck" small onPress={() => startStudy(selected.id)}/>
-              <Button label="Delete Deck" variant="danger" small onPress={() => removeDeck(selected)}/>
+              <Button label="Delete deck + reviews" variant="danger" small onPress={() => removeDeck(selected)}/>
+              <Button label="Save deck to My Drive" variant="subtle" small disabled={!auth.token || busy} onPress={() => void saveVisibleDrive(selected.id)}/>
             </View>
             <View style={styles.panel}>
               <Text style={styles.panelTitle}>{editingCard ? 'Edit Card' : 'Add a Card'}</Text>
@@ -283,7 +533,11 @@ export default function App() {
             <SectionTitle title={`Cards (${selectedCards.length})`} />
             {selectedCards.map((card, index) => <View key={card.id} style={styles.cardListItem}>
               <View style={{ flex: 1, gap: 5 }}><Text style={styles.muted}>#{index + 1} · {card.dueAt <= new Date().toISOString() ? 'Due' : 'Next: ' + new Date(card.dueAt).toLocaleDateString('en-US')}</Text>
-                <Text style={styles.itemTitle}>{card.front}</Text><Text style={styles.muted} numberOfLines={2}>{card.back}</Text></View>
+                {card.front.includes('$')
+                  ? <MathContent content={card.front} fontSize={16} dom={{ matchContents: true, scrollEnabled: false }}/>
+                  : <Text style={styles.itemTitle}>{card.front}</Text>}{card.back.includes('$')
+                  ? <MathContent content={card.back} fontSize={14} color="#A79FB9" dom={{ matchContents: true, scrollEnabled: false }}/>
+                  : <Text style={styles.muted} numberOfLines={2}>{card.back}</Text>}</View>
               <View style={{ gap: 7 }}><Button label="Edit" variant="subtle" small onPress={() => { setEditingCard(card.id); setFront(card.front); setBack(card.back); }}/>
                 <Button label="Delete" variant="danger" small onPress={() => removeCard(card)}/></View>
             </View>)}
@@ -303,7 +557,9 @@ export default function App() {
               <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}><Pill text={decks.find(d => d.id === current.deckId)?.name || 'Card'}/><Text style={styles.muted}>{queue.length} remaining</Text></View>
               <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 17 }}>
                 <Text style={styles.studyLabel}>{revealed ? 'ANSWER' : 'QUESTION'}</Text>
-                <Text selectable style={styles.question}>{revealed ? current.back : current.front}</Text>
+                {(revealed ? current.back : current.front).includes('$')
+                  ? <MathContent content={revealed ? current.back : current.front} fontSize={wide ? 25 : 21} center dom={{ matchContents: true, scrollEnabled: false }}/>
+                  : <Text selectable style={styles.question}>{revealed ? current.back : current.front}</Text>}
               </View>
               {!revealed && <Button label="Show Answer" onPress={() => setRevealed(true)} variant="yellow"/>}
               {revealed && <Text style={[styles.muted, { textAlign: 'center' }]}>How well did you remember it?</Text>}
@@ -335,6 +591,50 @@ export default function App() {
                 : <><Button label={busy ? 'Syncing…' : 'Sync with Drive'} disabled={busy} onPress={() => void driveSync()}/><Button label="Disconnect" variant="subtle" disabled={busy} onPress={auth.disconnect}/></>}
             </View>
             <Text style={[styles.muted, { fontSize: 12 }]}>Sync devices one at a time. Concurrent edits are not strictly protected against conflicts.</Text>
+          </View>
+          {/* DIY_FLASHCARD_AUTO_SYNC_V1: explicitly linked visible Drive file */}
+          <SectionTitle title="Automatic sync · My Drive" caption="A linked JSON stays selected across reloads in this browser." />
+          <View style={styles.panel}>
+            <Text style={styles.muted}>Target: {autoTarget?.name || 'Not linked'}</Text>
+            <Text style={{ color: autoStatus.startsWith('Sync failed') ? C.red : C.green, fontSize: 13 }}>{autoStatus}</Text>
+            {autoTargetMissing && <View style={{ gap: 9 }}>
+              <Text style={styles.muted}>The linked Drive JSON is in Trash, was deleted, or is inaccessible. Your local cards are still present. Choose whether to preserve or clear them. Neither option changes the hidden Drive backup.</Text>
+              <View style={styles.buttonRow}>
+                <Button label="Keep local data & unlink" variant="subtle" onPress={() => void disableAutoSync()} disabled={busy}/>
+                <Button label="Clear local data & unlink" variant="danger" onPress={() => void clearLocalAfterMissingDriveTarget()} disabled={busy}/>
+              </View>
+            </View>}
+            {!autoTarget ? <View style={styles.buttonRow}>
+              <Button label="Create sync folder + JSON" onPress={() => void enableAutoSync()} disabled={!auth.token || busy || Platform.OS !== 'web'} />
+              <Button label="Link existing Drive JSON (once)" onPress={() => void linkPickedAutoSync()} disabled={!auth.token || busy || Platform.OS !== 'web'} variant="yellow" />
+            </View> : <View style={styles.buttonRow}>
+              <Button label="Sync now" onPress={() => void runAutoSync()} disabled={!auth.token || busy} />
+              <Button label="Turn off auto-sync" variant="danger" onPress={() => void disableAutoSync()} disabled={busy} />
+            </View>}
+            <Text style={[styles.muted, { fontSize: 12 }]}>App edits upload after ~2.5 seconds; Drive changes are checked every 60 seconds while this tab is open and your Google account is connected. The app can create My Drive/diy-flashcard/flashcards.json automatically. Files uploaded separately into that folder are NOT discovered with drive.file permission; link an existing JSON once instead.</Text>
+          </View>
+          {/* YOU_FLASHCARD_DRIVE_V1 — My Drive direct read/write */}
+          <SectionTitle title="My Drive · Visible JSON files" caption="Save JSON backups or import a manually uploaded file with Google Picker." />
+          <View style={styles.panel}>
+            <Text style={styles.muted}>Files are visible in My Drive and can be downloaded or edited. This uses the limited drive.file permission, not full Drive access.</Text>
+            <View style={styles.buttonRow}>
+              <Button label="Save all to My Drive" onPress={() => void saveVisibleDrive()} disabled={!auth.token || busy} />
+              <Button label="List files in My Drive" onPress={() => void refreshDriveFiles()} disabled={!auth.token || busy} variant="subtle" />
+              <Button label="Pick JSON from My Drive" onPress={() => void importWithPicker()} disabled={!auth.token || busy || Platform.OS !== 'web'} variant="yellow" />
+            </View>
+            {driveFiles.map(file => <View key={file.id} style={{ gap: 8, borderTopColor: C.border, borderTopWidth: 1, paddingTop: 12 }}>
+              <Text style={styles.itemTitle} numberOfLines={2}>{file.name}</Text>
+              <View style={styles.buttonRow}>
+                <Button label="Load from Drive" small disabled={busy} onPress={() => void loadVisibleFile(file)} />
+                <Button label="Delete Drive file" small disabled={busy} variant="danger" onPress={() => deleteVisibleFile(file)} />
+              </View>
+            </View>)}
+            <Text style={[styles.muted, { fontSize: 12 }]}>App-created backups appear in the list above. For manually uploaded JSON, use Pick JSON from My Drive. Imports create fresh decks (review progress resets), leaving old deletion records intact. Sync hidden Drive separately.</Text>
+          </View>
+          <SectionTitle title="Danger zone" />
+          <View style={styles.panel}>
+            <Text style={styles.muted}>Delete every local deck, card and review. If connected, also propagate deletions to hidden Drive sync and delete app-created My Drive backups. Two confirmations are required.</Text>
+            <Button label="DELETE ALL STUDY DATA" variant="danger" disabled={busy} onPress={clearEverything} />
           </View>
           <SectionTitle title="Backup" />
           <View style={styles.panel}><Text style={styles.muted}>Export a JSON backup and import it when needed. Imports also merge deletion records.</Text>

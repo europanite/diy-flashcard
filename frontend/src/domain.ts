@@ -152,12 +152,19 @@ export function mergeSnapshots(local: Snapshot, remote: Snapshot): Snapshot {
   validateSnapshot(remote);
   const reviews = new Map<string, Review>();
   for (const r of [...local.reviews, ...remote.reviews]) reviews.set(r.id, r);
+  const decks = byLatest(local.decks, remote.decks);
+  const cards = byLatest(local.cards, remote.cards);
+  const deletedDeckIds = new Set(decks.filter(d => d.deletedAt).map(d => d.id));
+  const removedIds = new Set(cards.filter(c => c.deletedAt || deletedDeckIds.has(c.deckId)).map(c => c.id));
+  // Deleting a deck or card also removes its review history after merging with old backups.
   return {
     schemaVersion: 1,
     updatedAt: new Date().toISOString(),
-    decks: byLatest(local.decks, remote.decks),
-    cards: byLatest(local.cards, remote.cards),
-    reviews: [...reviews.values()].sort((a, b) => a.id.localeCompare(b.id)),
+    decks,
+    cards: cards.map(c => c.deletedAt || deletedDeckIds.has(c.deckId) ? {
+      ...c, front: '', back: '', deletedAt: c.deletedAt || decks.find(d => d.id === c.deckId)!.deletedAt,
+    } : c),
+    reviews: [...reviews.values()].filter(r => !removedIds.has(r.cardId)).sort((a, b) => a.id.localeCompare(b.id)),
   };
 }
 export function validateSnapshot(data: unknown): asserts data is Snapshot {
@@ -168,4 +175,73 @@ export function validateSnapshot(data: unknown): asserts data is Snapshot {
   for (const deck of d.decks) if (!deck || typeof deck.id !== 'string' || typeof deck.name !== 'string' || typeof deck.updatedAt !== 'string') throw new Error('Invalid deck data.');
   for (const c of d.cards) if (!c || typeof c.id !== 'string' || typeof c.deckId !== 'string' || typeof c.front !== 'string' || typeof c.back !== 'string' || typeof c.updatedAt !== 'string' || typeof c.dueAt !== 'string' || !Number.isFinite(c.intervalDays) || !Number.isFinite(c.ease)) throw new Error('Invalid card data.');
   for (const r of d.reviews) if (!r || typeof r.id !== 'string' || typeof r.cardId !== 'string' || ![0,1,2,3].includes(r.grade) || typeof r.reviewedAt !== 'string') throw new Error('Invalid review history.');
+}
+
+
+// YOU_FLASHCARD_DRIVE_V1 — Destructive operations keep scrubbed tombstones for syncing.
+function deletionTime(snapshot: Snapshot, now: string): string {
+  // A tombstone must be newer than records from this device, even after clock skew.
+  const timestamps = [snapshot.updatedAt,
+    ...snapshot.decks.map(d => d.updatedAt), ...snapshot.cards.map(c => c.updatedAt)];
+  const latest = Math.max(...timestamps.map(t => Date.parse(t) || 0), 0);
+  return new Date(Math.max(Date.parse(now), latest + 1)).toISOString();
+}
+
+/** Removes a card's content and reviews, keeping only the sync tombstone. */
+export function deleteCardData(snapshot: Snapshot, cardId: string, now = new Date().toISOString()): Snapshot {
+  validateSnapshot(snapshot);
+  const at = deletionTime(snapshot, now);
+  return {
+    ...snapshot, updatedAt: at,
+    cards: snapshot.cards.map(c => c.id === cardId
+      ? { ...c, front: '', back: '', updatedAt: at, deletedAt: at } : c),
+    reviews: snapshot.reviews.filter(r => r.cardId !== cardId),
+  };
+}
+
+/** Permanently clears a deck's content and reviews, preserving IDs as tombstones. */
+export function deleteDeckData(snapshot: Snapshot, deckId: string, now = new Date().toISOString()): Snapshot {
+  validateSnapshot(snapshot);
+  const at = deletionTime(snapshot, now);
+  const cardIds = new Set(snapshot.cards.filter(c => c.deckId === deckId).map(c => c.id));
+  return {
+    ...snapshot, updatedAt: at,
+    decks: snapshot.decks.map(d => d.id === deckId
+      ? { ...d, name: 'Deleted deck', description: '', deletedAt: at, updatedAt: at } : d),
+    cards: snapshot.cards.map(c => cardIds.has(c.id)
+      ? { ...c, front: '', back: '', deletedAt: at, updatedAt: at } : c),
+    reviews: snapshot.reviews.filter(r => !cardIds.has(r.cardId)),
+  };
+}
+
+/** Resets all visible decks, cards, and review history. Tombstones block old sync data. */
+export function clearAllData(snapshot: Snapshot, now = new Date().toISOString()): Snapshot {
+  validateSnapshot(snapshot);
+  const at = deletionTime(snapshot, now);
+  return {
+    schemaVersion: 1, updatedAt: at,
+    decks: snapshot.decks.map(d => ({ ...d, name: 'Deleted deck', description: '', deletedAt: at, updatedAt: at })),
+    cards: snapshot.cards.map(c => ({ ...c, front: '', back: '', deletedAt: at, updatedAt: at })),
+    reviews: [],
+  };
+}
+
+// YOU_FLASHCARD_GOOGLE_PICKER_V2 — a fresh copy cannot be erased by prior Drive tombstones.
+/** Import decks and cards with NEW IDs, reset study progress and exclude deletion records. */
+export function importAsNewDecks(source: Snapshot, at = new Date().toISOString()): Snapshot {
+  validateSnapshot(source);
+  const liveDecks = source.decks.filter(d => !d.deletedAt);
+  if (!liveDecks.length) throw new Error('The selected JSON contains no active decks.');
+  const deckIds = new Map(liveDecks.map(d => [d.id, id()]));
+  const liveCards = source.cards.filter(c => !c.deletedAt && deckIds.has(c.deckId));
+  const decks = liveDecks.map(d => ({
+    id: deckIds.get(d.id)!, name: d.name, description: d.description || '',
+    createdAt: at, updatedAt: at,
+  }));
+  const cards = liveCards.map(c => ({
+    id: id(), deckId: deckIds.get(c.deckId)!, front: c.front, back: c.back,
+    createdAt: at, updatedAt: at, dueAt: at, intervalDays: 0, ease: 2.5,
+    repetitions: 0, lapses: 0, seen: 0, remembered: 0,
+  }));
+  return { schemaVersion: 1, updatedAt: at, decks, cards, reviews: [] };
 }

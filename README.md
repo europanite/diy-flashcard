@@ -64,6 +64,23 @@ Expo Go can run the local/offline application. For **native Google OAuth**, crea
 
 **Data model:** a single `service-v1.json` is stored in Google's hidden app data folder. This file will not appear in normal My Drive. Sync downloads, merges decks/cards by stable IDs with latest `updatedAt`, unifies review IDs, then uploads. Deletes are represented as tombstones, so an offline device will not simply resurrect removed cards. **This is not a transactional multi-device database**: overlapping simultaneous syncs, clock skew, or multiple concurrent browser tabs can lose the last write. For multi-device use, sync **sequentially**; the API backend includes an optimistic concurrency control example for a future hosted version.
 
+## Visible My Drive JSON files (new)
+
+<!-- YOU_FLASHCARD_DRIVE_V1 -->
+
+- On **Google Auth Platform → Data Access**, add **both** scopes:
+  `https://www.googleapis.com/auth/drive.appdata` (existing hidden sync)
+  and `https://www.googleapis.com/auth/drive.file` (visible app-created JSON files).
+- Reconnect **Settings → Google Drive** after changing scopes. The Web OAuth client ID stays the same; do not add a client secret.
+- **Save all to My Drive** creates/updates `you-flashcard-library.json` in the root of My Drive.
+- **Save deck to My Drive** (in a deck) creates/updates a visible `you-flashcard-deck-<deck-id>.json` file with that deck's cards and review history. The name stays stable when a deck is renamed.
+- **List files in My Drive → Load from Drive** imports directly from Drive API and merges by stable entity IDs. No local download is required.
+- **Delete Drive file** deletes the corresponding visible Drive backup (not the active local deck).
+- **Delete deck + reviews** scrubs its content and review history while retaining ID tombstones so an older hidden backup cannot resurrect it.
+- **DELETE ALL STUDY DATA** requires two confirmations, scrubs local content, updates the hidden synced backup (if connected), and deletes all app-created visible My Drive JSON backups. When offline, Drive cleanup must be completed after reconnecting.
+- `drive.file` can list/read only files created by this app or opened through a Google file picker. This implementation does **not** include Google Picker; files uploaded separately to Drive are not directly accessible. For that case use the existing **Import JSON (Web)** button, or modify a file originally created by this app.
+- This is manual sync with last-write-wins semantics; do not edit from multiple devices simultaneously. Tombstone metadata may remain in the hidden file for safe sync, even after Clear All. Back up data before destructive operations.
+
 ## Optional FastAPI service (paid-tier starter)
 
 Run independently, bound to localhost:
@@ -127,3 +144,90 @@ The script initializes Git, commits once if needed, and creates a **private** `s
 ## License
 
 MIT (see `LICENSE`).
+
+
+## Import manually uploaded JSON from Google Drive (Web)
+
+<!-- YOU_FLASHCARD_GOOGLE_PICKER_V2 -->
+
+The app now includes **Pick JSON from My Drive** in Settings. Unlike the existing
+**List files in My Drive**, Picker can open a JSON file you uploaded manually.
+The file is read with the existing `drive.file` scope; full Drive access is not requested.
+
+One-time Google Cloud setup (in the **same project** as the OAuth Web Client ID):
+
+1. Enable **Google Picker API** and **Google Drive API** in API Library.
+2. Create an **API key** in APIs & Services > Credentials. Restrict it to **Websites**,
+   add `http://localhost:8081/*` and `https://docs.google.com/*` as allowed referrers,
+   and restrict API access to **Google Picker API** and **Google Drive API**.
+   Google's Picker iframe can require the `docs.google.com` referrer.
+3. Find your **numeric Project number** in Google Cloud project details (not the
+   project ID string). This number is the Picker App ID.
+4. Put the following in the **root `.env`** (not `frontend/.env` for Compose):
+
+   ```dotenv
+   EXPO_PUBLIC_GOOGLE_PICKER_API_KEY=YOUR_RESTRICTED_BROWSER_API_KEY
+   EXPO_PUBLIC_GOOGLE_PROJECT_NUMBER=YOUR_NUMERIC_PROJECT_NUMBER
+   ```
+
+5. Keep your original `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` and the `drive.file`
+   OAuth scope. Reconnect Google Drive if the token lacks the new permission.
+6. Run `docker compose up -d --build --force-recreate frontend`.
+7. Upload a **you-flashcard JSON export** to your Google Drive (e.g. the Japanese
+   ODE formulas JSON). Use Settings > Connect Google Account > **Pick JSON from My
+   Drive** > choose your uploaded `.json` > confirm.
+
+Imported decks and cards receive fresh IDs to avoid being removed by earlier
+**Delete all** tombstones. Imports are additive and reset review history and due
+dates for those imported cards; they do **not** automatically modify the source
+file in Drive. Repeating an import creates another copy. Use **Sync with Drive**
+to back up new local decks into the hidden appDataFolder.
+
+Notes: This feature is **Web only**. Google Picker does not accept a JSON structure
+other than the existing version-1 snapshot (`schemaVersion`, `decks`, `cards`, `reviews`).
+Maximum uploaded JSON size: 10 MB. API keys and project numbers are public
+identifiers; restrict the API key and never embed an OAuth Client Secret.
+Google Picker and Drive API are subject to Google quotas and policy; do not
+assume other Google Cloud services are free.
+
+Reference: https://developers.google.com/workspace/drive/picker/guides/web-picker-sample
+
+<!-- DIY_FLASHCARD_AUTO_SYNC_V1 -->
+## Automatic sync with a visible Google Drive JSON (Web)
+
+The free plan can automatically sync a visible JSON file with **My Drive** while the
+browser is open and the Google account is connected. It uses existing `drive.file`
+and `drive.appdata` scopes; no Firebase, GAS, or paid backend is required.
+
+In **Settings → Automatic sync · My Drive**, choose one of two options:
+
+1. **Create sync folder + JSON**: create and link `My Drive/diy-flashcard/flashcards.json`
+   (the folder and file are owned by the app's Drive API access). Existing app-owned
+   `flashcards.json` in that folder will be re-used without immediate overwrite.
+2. **Link existing Drive JSON (once)**: use Google Picker one time to grant access
+   to a manually uploaded JSON file. Confirm the warning: its active decks are
+   imported under new IDs and **that original selected JSON is replaced** with the
+   combined study data. Back up the selected JSON first if the original must remain unchanged.
+   The selected file ID is remembered in this browser; it need not be picked again.
+
+Local edits are uploaded after approximately 2.5 seconds; remote changes are
+checked every 60 seconds when the tab is visible, and on reconnect. To sync
+between browser sessions, click **Connect Google Account** again after reload;
+OAuth access tokens are not stored on disk. **Sync now** forces an immediate check.
+A per-browser three-way merge combines edits to separate decks/cards; simultaneous
+edits to the *same* entity are flagged as a conflict rather than overwritten.
+This is not an atomic or transactional multi-device database. Avoid simultaneous
+editing in multiple browser tabs/devices.
+
+**Permission limitation:** `drive.file` lets the app read its own files and files
+explicitly granted via Picker. It does **not** allow automatic discovery of arbitrary
+new JSON files manually dropped into a folder. For one of those files, click
+**Link existing Drive JSON (once)**. Monitoring *every new file* in a manually
+managed folder would need broader Drive-read permission or a separate service.
+The existing hidden `appDataFolder` sync remains available independently; avoid
+syncing conflicting copies through both mechanisms at the same time.
+
+The automatic-sync feature currently operates on **Web only**. Android/iOS continue
+to support the original manual sync workflow. It does not run while the app is
+closed, offline, or not signed in. This is appropriate for no-cost local development
+but not for always-on server-side synchronization.

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-const SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+// YOU_FLASHCARD_DRIVE_V1: the app requests both hidden backup and visible app files.
+const SCOPE = 'https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.file';
 const CLIENT = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || '';
 type GoogleToken = { access_token?: string; error?: string; error_description?: string };
 type TokenClient = { requestAccessToken: (options?: { prompt?: string }) => void };
