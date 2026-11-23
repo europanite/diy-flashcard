@@ -169,7 +169,7 @@ export default function App() {
       URL.revokeObjectURL(url);
       notify('JSON backup exported.');
     } else {
-      try { await Share.share({ message: json, title: 'You FrashCard backup' }); }
+      try { await Share.share({ message: json, title: 'DIY FrashCard backup' }); }
       catch (error) { notify(String((error as Error).message)); }
     }
   }

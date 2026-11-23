@@ -1,8 +1,8 @@
-# You FrashCard
+# DIY FrashCard
 
 `GitHub URL: filled in by scripts/publish-github.sh` · [Expo](https://docs.expo.dev/) · [Google Drive appDataFolder](https://developers.google.com/workspace/drive/api/guides/appdata)
 
-**You FrashCard** is a free-first, local-first spaced-repetition flashcard application built with **Expo SDK 58 + React Native** (Web, Android, iOS). An **optional FastAPI / SQLite** backend is included as the foundation for a future paid tier. No Firebase or Apps Script is required.
+**DIY FrashCard** is a free-first, local-first spaced-repetition flashcard application built with **Expo SDK 58 + React Native** (Web, Android, iOS). An **optional FastAPI / SQLite** backend is included as the foundation for a future paid tier. No Firebase or Apps Script is required.
 
 ## Features
 

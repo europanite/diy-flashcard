@@ -18,7 +18,7 @@ if ! git config user.name >/dev/null || ! git config user.email >/dev/null; then
 fi
 if ! git rev-parse HEAD >/dev/null 2>&1; then
   git add .
-  git commit -m "Initial You FrashCard Expo/FastAPI app"
+  git commit -m "Initial DIY FrashCard Expo/FastAPI app"
 fi
 if git remote get-url origin >/dev/null 2>&1; then
   echo "Origin already exists: $(git remote get-url origin)"

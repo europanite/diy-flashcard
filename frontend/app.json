@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "You FrashCard",
+    "name": "DIY FrashCard",
     "slug": "service",
     "scheme": "recalldeck",
     "version": "0.1.0",
     "orientation": "default",
     "userInterfaceStyle": "dark",
-    "web": { "name": "You FrashCard", "bundler": "metro" },
+    "web": { "name": "DIY FrashCard", "bundler": "metro" },
     "ios": { "bundleIdentifier": "com.example.recalldeck", "supportsTablet": true },
     "android": { "package": "com.example.recalldeck" },
     "plugins": ["expo-web-browser"]

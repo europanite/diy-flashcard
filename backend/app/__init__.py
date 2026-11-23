@@ -1,1 +1,1 @@
-"""You FrashCard optional API package."""
+"""DIY FrashCard optional API package."""

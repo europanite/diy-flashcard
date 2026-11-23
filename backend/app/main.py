@@ -18,7 +18,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-APP = FastAPI(title="You FrashCard API", version="0.1.0", description="Optional subscription backend (development only)")
+APP = FastAPI(title="DIY FrashCard API", version="0.1.0", description="Optional subscription backend (development only)")
 LOCK = threading.Lock()
 
 
