@@ -1,0 +1,34 @@
+name: service
+services:
+  frontend:
+    build:
+      context: ./frontend
+    ports:
+      - "127.0.0.1:8081:8081"
+    environment:
+      EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID: ${EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID:-}
+      EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID: ${EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID:-}
+      EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID: ${EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID:-}
+    develop:
+      watch:
+        - action: sync
+          path: ./frontend
+          target: /app
+          ignore:
+            - node_modules/
+            - .expo/
+        - action: rebuild
+          path: ./frontend/package.json
+  api:
+    profiles: ["paid"]
+    build:
+      context: ./backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      DATABASE_PATH: /data/service.sqlite3
+      API_KEY: ${API_KEY:-}
+    volumes:
+      - api_data:/data
+volumes:
+  api_data:

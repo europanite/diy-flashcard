@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm install --no-audit --no-fund
+      - name: Domain tests
+        working-directory: frontend
+        run: npm test
+      - name: TypeScript validation
+        working-directory: frontend
+        run: npm run typecheck
+      - name: Expo web export
+        working-directory: frontend
+        run: npm run build:web
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install
+        working-directory: backend
+        run: pip install -r requirements-dev.txt
+      - name: API tests
+        working-directory: backend
+        run: python -m pytest -q

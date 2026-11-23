@@ -1,0 +1,10 @@
+name: test
+services:
+  frontend_test:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.test
+  api_test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.test
